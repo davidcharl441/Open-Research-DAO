@@ -8,6 +8,8 @@
 (define-constant ERR_ALREADY_MEMBER (err u106))
 (define-constant ERR_NOT_MEMBER (err u107))
 (define-constant ERR_INVALID_AMOUNT (err u108))
+(define-constant ERR_NOT_MEMBER_REP (err u200))
+(define-constant ERR_INVALID_REPUTATION (err u201))
 
 (define-data-var proposal-counter uint u0)
 (define-data-var member-counter uint u0)
@@ -279,4 +281,94 @@
 
 (define-read-only (get-contract-balance)
   (stx-get-balance (as-contract tx-sender))
+)
+
+
+
+(define-map member-reputation principal uint)
+(define-map reputation-history
+  { member: principal, action-type: (string-ascii 20), timestamp: uint }
+  { points: uint, details: (string-ascii 100) }
+)
+
+(define-data-var reputation-counter uint u0)
+
+(define-private (award-reputation (member principal) (points uint) (action-type (string-ascii 20)) (details (string-ascii 100)))
+  (let
+    (
+      (current-rep (default-to u0 (map-get? member-reputation member)))
+      (counter (var-get reputation-counter))
+    )
+    (map-set member-reputation member (+ current-rep points))
+    (map-set reputation-history
+      { member: member, action-type: action-type, timestamp: stacks-block-height }
+      { points: points, details: details }
+    )
+    (var-set reputation-counter (+ counter u1))
+    (ok true)
+  )
+)
+
+(define-public (award-proposal-reputation (member principal))
+  (let
+    (
+      (is-member (default-to false (map-get? members member)))
+    )
+    (asserts! is-member ERR_NOT_MEMBER_REP)
+    (award-reputation member u50 "proposal-approved" "Research proposal approved")
+  )
+)
+
+(define-public (award-review-reputation (member principal) (review-score uint))
+  (let
+    (
+      (is-member (default-to false (map-get? members member)))
+      (rep-points (if (>= review-score u8) u20 u10))
+    )
+    (asserts! is-member ERR_NOT_MEMBER_REP)
+    (asserts! (<= review-score u10) ERR_INVALID_REPUTATION)
+    (award-reputation member rep-points "peer-review" "Quality peer review submitted")
+  )
+)
+
+(define-public (award-participation-reputation (member principal))
+  (let
+    (
+      (is-member (default-to false (map-get? members member)))
+    )
+    (asserts! is-member ERR_NOT_MEMBER_REP)
+    (award-reputation member u5 "participation" "Active DAO participation")
+  )
+)
+
+(define-read-only (get-member-reputation (member principal))
+  (default-to u0 (map-get? member-reputation member))
+)
+
+(define-read-only (get-reputation-history (member principal) (action-type (string-ascii 20)) (timestamp uint))
+  (map-get? reputation-history { member: member, action-type: action-type, timestamp: timestamp })
+)
+
+(define-read-only (get-reputation-tier (member principal))
+  (let
+    (
+      (rep-score (get-member-reputation member))
+    )
+    (if (>= rep-score u500)
+      "expert"
+      (if (>= rep-score u200)
+        "advanced"
+        (if (>= rep-score u50)
+          "intermediate"
+          "beginner"
+        )
+      )
+    )
+  )
+)
+
+(define-read-only (get-reputation-stats)
+  {
+    total-reputation-entries: (var-get reputation-counter)
+  }
 )
