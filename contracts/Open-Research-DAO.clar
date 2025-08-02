@@ -11,6 +11,12 @@
 (define-constant ERR_NOT_MEMBER_REP (err u200))
 (define-constant ERR_INVALID_REPUTATION (err u201))
 
+(define-constant ERR_MILESTONE_NOT_FOUND (err u300))
+(define-constant ERR_MILESTONE_ALREADY_COMPLETED (err u301))
+(define-constant ERR_MILESTONE_DEADLINE_PASSED (err u302))
+
+(define-data-var milestone-counter uint u0)
+
 (define-data-var proposal-counter uint u0)
 (define-data-var member-counter uint u0)
 
@@ -371,4 +377,99 @@
   {
     total-reputation-entries: (var-get reputation-counter)
   }
+)
+
+(define-map research-milestones
+  uint
+  {
+    proposal-id: uint,
+    researcher: principal,
+    title: (string-ascii 100),
+    description: (string-ascii 300),
+    deadline: uint,
+    funding-percentage: uint,
+    completed: bool,
+    completion-evidence: (string-ascii 64),
+    completed-at: uint
+  }
+)
+
+(define-map proposal-milestones
+  uint
+  { milestone-ids: (list 10 uint), total-milestones: uint }
+)
+
+(define-public (create-milestone (proposal-id uint) (title (string-ascii 100)) (description (string-ascii 300)) (deadline uint) (funding-percentage uint))
+  (let
+    (
+      (proposal (unwrap! (map-get? proposals proposal-id) ERR_PROPOSAL_NOT_FOUND))
+      (milestone-id (+ (var-get milestone-counter) u1))
+      (current-milestones (default-to { milestone-ids: (list), total-milestones: u0 } (map-get? proposal-milestones proposal-id)))
+    )
+    (asserts! (is-eq tx-sender (get proposer proposal)) ERR_NOT_AUTHORIZED)
+    (asserts! (is-eq (get status proposal) "approved") ERR_PROPOSAL_NOT_APPROVED)
+    (asserts! (> deadline stacks-block-height) ERR_VOTING_ENDED)
+    (asserts! (<= funding-percentage u100) ERR_INVALID_AMOUNT)
+    (map-set research-milestones milestone-id
+      {
+        proposal-id: proposal-id,
+        researcher: tx-sender,
+        title: title,
+        description: description,
+        deadline: deadline,
+        funding-percentage: funding-percentage,
+        completed: false,
+        completion-evidence: "",
+        completed-at: u0
+      }
+    )
+    (map-set proposal-milestones proposal-id
+      {
+        milestone-ids: (unwrap! (as-max-len? (append (get milestone-ids current-milestones) milestone-id) u10) ERR_INVALID_AMOUNT),
+        total-milestones: (+ (get total-milestones current-milestones) u1)
+      }
+    )
+    (var-set milestone-counter milestone-id)
+    (ok milestone-id)
+  )
+)
+
+(define-public (complete-milestone (milestone-id uint) (evidence-hash (string-ascii 64)))
+  (let
+    (
+      (milestone (unwrap! (map-get? research-milestones milestone-id) ERR_MILESTONE_NOT_FOUND))
+    )
+    (asserts! (is-eq tx-sender (get researcher milestone)) ERR_NOT_AUTHORIZED)
+    (asserts! (not (get completed milestone)) ERR_MILESTONE_ALREADY_COMPLETED)
+    (asserts! (<= stacks-block-height (get deadline milestone)) ERR_MILESTONE_DEADLINE_PASSED)
+    (map-set research-milestones milestone-id
+      (merge milestone {
+        completed: true,
+        completion-evidence: evidence-hash,
+        completed-at: stacks-block-height
+      })
+    )
+    (ok true)
+  )
+)
+
+(define-read-only (get-milestone (milestone-id uint))
+  (map-get? research-milestones milestone-id)
+)
+
+(define-read-only (get-proposal-milestones (proposal-id uint))
+  (map-get? proposal-milestones proposal-id)
+)
+
+(define-read-only (get-milestone-stats (proposal-id uint))
+  (let
+    (
+      (milestone-data (default-to { milestone-ids: (list), total-milestones: u0 } (map-get? proposal-milestones proposal-id)))
+      (total-count (get total-milestones milestone-data))
+    )
+    {
+      total-milestones: total-count,
+      completion-rate: (if (> total-count u0) (/ (* u100 total-count) total-count) u0)
+    }
+  )
 )
