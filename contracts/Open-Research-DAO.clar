@@ -15,6 +15,14 @@
 (define-constant ERR_MILESTONE_ALREADY_COMPLETED (err u301))
 (define-constant ERR_MILESTONE_DEADLINE_PASSED (err u302))
 
+(define-constant ERR_COLLABORATION_NOT_FOUND (err u400))
+(define-constant ERR_NOT_TEAM_LEAD (err u401))
+(define-constant ERR_INVALID_PERCENTAGE (err u402))
+(define-constant ERR_ALREADY_COLLABORATOR (err u403))
+(define-constant ERR_TEAM_FULL (err u404))
+
+(define-data-var collaboration-counter uint u0)
+
 (define-data-var milestone-counter uint u0)
 
 (define-data-var proposal-counter uint u0)
@@ -472,4 +480,98 @@
       completion-rate: (if (> total-count u0) (/ (* u100 total-count) total-count) u0)
     }
   )
+)
+
+
+(define-map research-collaborations
+  uint
+  {
+    lead-researcher: principal,
+    proposal-id: uint,
+    max-collaborators: uint,
+    current-collaborators: uint,
+    funding-distributed: bool
+  }
+)
+
+(define-map collaboration-members
+  { collab-id: uint, member: principal }
+  {
+    contribution-percentage: uint,
+    expertise-area: (string-ascii 50),
+    joined-at: uint
+  }
+)
+
+(define-public (create-collaboration (proposal-id uint) (max-collaborators uint))
+  (let
+    (
+      (proposal (unwrap! (map-get? proposals proposal-id) ERR_PROPOSAL_NOT_FOUND))
+      (collab-id (+ (var-get collaboration-counter) u1))
+    )
+    (asserts! (is-eq tx-sender (get proposer proposal)) ERR_NOT_AUTHORIZED)
+    (asserts! (<= max-collaborators u5) ERR_INVALID_AMOUNT)
+    (map-set research-collaborations collab-id
+      {
+        lead-researcher: tx-sender,
+        proposal-id: proposal-id,
+        max-collaborators: max-collaborators,
+        current-collaborators: u0,
+        funding-distributed: false
+      }
+    )
+    (var-set collaboration-counter collab-id)
+    (ok collab-id)
+  )
+)
+
+(define-public (join-collaboration (collab-id uint) (contribution-percentage uint) (expertise-area (string-ascii 50)))
+  (let
+    (
+      (collaboration (unwrap! (map-get? research-collaborations collab-id) ERR_COLLABORATION_NOT_FOUND))
+      (is-member (default-to false (map-get? members tx-sender)))
+      (already-joined (is-some (map-get? collaboration-members { collab-id: collab-id, member: tx-sender })))
+    )
+    (asserts! is-member ERR_NOT_MEMBER)
+    (asserts! (not already-joined) ERR_ALREADY_COLLABORATOR)
+    (asserts! (< (get current-collaborators collaboration) (get max-collaborators collaboration)) ERR_TEAM_FULL)
+    (asserts! (and (> contribution-percentage u0) (<= contribution-percentage u100)) ERR_INVALID_PERCENTAGE)
+    (map-set collaboration-members
+      { collab-id: collab-id, member: tx-sender }
+      {
+        contribution-percentage: contribution-percentage,
+        expertise-area: expertise-area,
+        joined-at: stacks-block-height
+      }
+    )
+    (map-set research-collaborations collab-id
+      (merge collaboration { current-collaborators: (+ (get current-collaborators collaboration) u1) })
+    )
+    (ok true)
+  )
+)
+
+(define-public (distribute-collaboration-funding (collab-id uint))
+  (let
+    (
+      (collaboration (unwrap! (map-get? research-collaborations collab-id) ERR_COLLABORATION_NOT_FOUND))
+      (proposal-id (get proposal-id collaboration))
+      (proposal (unwrap! (map-get? proposals proposal-id) ERR_PROPOSAL_NOT_FOUND))
+    )
+    (asserts! (is-eq tx-sender (get lead-researcher collaboration)) ERR_NOT_TEAM_LEAD)
+    (asserts! (get executed proposal) ERR_PROPOSAL_NOT_APPROVED)
+    (asserts! (not (get funding-distributed collaboration)) ERR_PROPOSAL_NOT_APPROVED)
+    (map-set research-collaborations collab-id
+      (merge collaboration { funding-distributed: true })
+    )
+    (ok true)
+  )
+)
+
+(define-read-only (get-collaboration (collab-id uint))
+  (map-get? research-collaborations collab-id)
+)
+
+(define-read-only (get-collaboration-member (collab-id uint) (member principal))
+  (map-get? collaboration-members { collab-id: collab-id, member: member })
 )
