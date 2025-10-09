@@ -575,3 +575,126 @@
 (define-read-only (get-collaboration-member (collab-id uint) (member principal))
   (map-get? collaboration-members { collab-id: collab-id, member: member })
 )
+
+(define-constant ERR_DISPUTE_NOT_FOUND (err u500))
+(define-constant ERR_INVALID_DISPUTE_TYPE (err u501))
+(define-constant ERR_DISPUTE_ALREADY_RESOLVED (err u502))
+(define-constant ERR_ARBITRATION_ENDED (err u503))
+(define-constant ERR_ALREADY_ARBITRATED (err u504))
+(define-constant MIN_ARBITRATOR_REPUTATION u100)
+
+(define-data-var dispute-counter uint u0)
+
+(define-map disputes
+  uint
+  {
+    initiator: principal,
+    defendant: principal,
+    dispute-type: (string-ascii 30),
+    target-id: uint,
+    evidence-hash: (string-ascii 64),
+    votes-uphold: uint,
+    votes-dismiss: uint,
+    arbitration-deadline: uint,
+    resolved: bool,
+    resolution: (string-ascii 20)
+  }
+)
+
+(define-map arbitrator-votes
+  { dispute-id: uint, arbitrator: principal }
+  { vote-uphold: bool, voting-power: uint }
+)
+
+(define-public (create-dispute (defendant principal) (dispute-type (string-ascii 30)) (target-id uint) (evidence-hash (string-ascii 64)))
+  (let
+    (
+      (dispute-id (+ (var-get dispute-counter) u1))
+      (is-member (default-to false (map-get? members tx-sender)))
+      (arbitration-deadline (+ stacks-block-height u288))
+    )
+    (asserts! is-member ERR_NOT_MEMBER)
+    (map-set disputes dispute-id
+      {
+        initiator: tx-sender,
+        defendant: defendant,
+        dispute-type: dispute-type,
+        target-id: target-id,
+        evidence-hash: evidence-hash,
+        votes-uphold: u0,
+        votes-dismiss: u0,
+        arbitration-deadline: arbitration-deadline,
+        resolved: false,
+        resolution: "pending"
+      }
+    )
+    (var-set dispute-counter dispute-id)
+    (ok dispute-id)
+  )
+)
+
+(define-public (vote-on-dispute (dispute-id uint) (vote-uphold bool))
+  (let
+    (
+      (dispute (unwrap! (map-get? disputes dispute-id) ERR_DISPUTE_NOT_FOUND))
+      (arbitrator-rep (get-member-reputation tx-sender))
+      (has-voted (is-some (map-get? arbitrator-votes { dispute-id: dispute-id, arbitrator: tx-sender })))
+      (voting-power (default-to u0 (map-get? member-voting-power tx-sender)))
+    )
+    (asserts! (>= arbitrator-rep MIN_ARBITRATOR_REPUTATION) ERR_NOT_MEMBER_REP)
+    (asserts! (not has-voted) ERR_ALREADY_ARBITRATED)
+    (asserts! (<= stacks-block-height (get arbitration-deadline dispute)) ERR_ARBITRATION_ENDED)
+    (asserts! (not (get resolved dispute)) ERR_DISPUTE_ALREADY_RESOLVED)
+    (map-set arbitrator-votes
+      { dispute-id: dispute-id, arbitrator: tx-sender }
+      { vote-uphold: vote-uphold, voting-power: voting-power }
+    )
+    (if vote-uphold
+      (map-set disputes dispute-id
+        (merge dispute { votes-uphold: (+ (get votes-uphold dispute) voting-power) })
+      )
+      (map-set disputes dispute-id
+        (merge dispute { votes-dismiss: (+ (get votes-dismiss dispute) voting-power) })
+      )
+    )
+    (ok true)
+  )
+)
+
+(define-public (resolve-dispute (dispute-id uint))
+  (let
+    (
+      (dispute (unwrap! (map-get? disputes dispute-id) ERR_DISPUTE_NOT_FOUND))
+      (votes-uphold (get votes-uphold dispute))
+      (votes-dismiss (get votes-dismiss dispute))
+    )
+    (asserts! (> stacks-block-height (get arbitration-deadline dispute)) ERR_ARBITRATION_ENDED)
+    (asserts! (not (get resolved dispute)) ERR_DISPUTE_ALREADY_RESOLVED)
+    (if (> votes-uphold votes-dismiss)
+      (begin
+        (map-set disputes dispute-id
+          (merge dispute { resolved: true, resolution: "upheld" })
+        )
+        (ok "upheld")
+      )
+      (begin
+        (map-set disputes dispute-id
+          (merge dispute { resolved: true, resolution: "dismissed" })
+        )
+        (ok "dismissed")
+      )
+    )
+  )
+)
+
+(define-read-only (get-dispute (dispute-id uint))
+  (map-get? disputes dispute-id)
+)
+
+(define-read-only (get-arbitrator-vote (dispute-id uint) (arbitrator principal))
+  (map-get? arbitrator-votes { dispute-id: dispute-id, arbitrator: arbitrator })
+)
+
+(define-read-only (get-total-disputes)
+  (var-get dispute-counter)
+)
