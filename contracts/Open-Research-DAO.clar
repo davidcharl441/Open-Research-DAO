@@ -21,6 +21,13 @@
 (define-constant ERR_ALREADY_COLLABORATOR (err u403))
 (define-constant ERR_TEAM_FULL (err u404))
 
+(define-constant ERR_STREAM_NOT_FOUND (err u600))
+(define-constant ERR_STREAM_ALREADY_EXISTS (err u601))
+(define-constant ERR_NO_FUNDS_AVAILABLE (err u602))
+(define-constant ERR_STREAM_ENDED (err u603))
+
+(define-data-var stream-counter uint u0)
+
 (define-data-var collaboration-counter uint u0)
 
 (define-data-var milestone-counter uint u0)
@@ -697,4 +704,90 @@
 
 (define-read-only (get-total-disputes)
   (var-get dispute-counter)
+)
+
+(define-map funding-streams
+  uint
+  {
+    proposal-id: uint,
+    recipient: principal,
+    total-amount: uint,
+    withdrawn-amount: uint,
+    start-block: uint,
+    end-block: uint,
+    duration-blocks: uint,
+    active: bool
+  }
+)
+
+(define-public (create-funding-stream (proposal-id uint) (duration-blocks uint))
+  (let
+    (
+      (proposal (unwrap! (map-get? proposals proposal-id) ERR_PROPOSAL_NOT_FOUND))
+      (stream-id (+ (var-get stream-counter) u1))
+      (funding-amount (get funding-amount proposal))
+      (contract-balance (stx-get-balance (as-contract tx-sender)))
+      (existing-stream (map-get? funding-streams proposal-id))
+    )
+    (asserts! (is-eq (get status proposal) "approved") ERR_PROPOSAL_NOT_APPROVED)
+    (asserts! (get executed proposal) ERR_PROPOSAL_NOT_APPROVED)
+    (asserts! (is-none existing-stream) ERR_STREAM_ALREADY_EXISTS)
+    (asserts! (>= contract-balance funding-amount) ERR_INSUFFICIENT_FUNDS)
+    (asserts! (> duration-blocks u0) ERR_INVALID_AMOUNT)
+    (map-set funding-streams stream-id
+      {
+        proposal-id: proposal-id,
+        recipient: (get proposer proposal),
+        total-amount: funding-amount,
+        withdrawn-amount: u0,
+        start-block: stacks-block-height,
+        end-block: (+ stacks-block-height duration-blocks),
+        duration-blocks: duration-blocks,
+        active: true
+      }
+    )
+    (var-set stream-counter stream-id)
+    (ok stream-id)
+  )
+)
+
+(define-public (withdraw-from-stream (stream-id uint))
+  (let
+    (
+      (stream (unwrap! (map-get? funding-streams stream-id) ERR_STREAM_NOT_FOUND))
+      (available-amount (unwrap! (get-withdrawable-amount stream-id) ERR_NO_FUNDS_AVAILABLE))
+    )
+    (asserts! (is-eq tx-sender (get recipient stream)) ERR_NOT_AUTHORIZED)
+    (asserts! (get active stream) ERR_STREAM_ENDED)
+    (asserts! (> available-amount u0) ERR_NO_FUNDS_AVAILABLE)
+    (try! (as-contract (stx-transfer? available-amount tx-sender (get recipient stream))))
+    (map-set funding-streams stream-id
+      (merge stream {
+        withdrawn-amount: (+ (get withdrawn-amount stream) available-amount)
+      })
+    )
+    (ok available-amount)
+  )
+)
+
+(define-read-only (get-withdrawable-amount (stream-id uint))
+  (match (map-get? funding-streams stream-id)
+    stream
+      (let
+        (
+          (elapsed-blocks (- stacks-block-height (get start-block stream)))
+          (vested-amount (if (>= elapsed-blocks (get duration-blocks stream))
+            (get total-amount stream)
+            (/ (* (get total-amount stream) elapsed-blocks) (get duration-blocks stream))
+          ))
+          (withdrawable (- vested-amount (get withdrawn-amount stream)))
+        )
+        (ok withdrawable)
+      )
+    (err ERR_STREAM_NOT_FOUND)
+  )
+)
+
+(define-read-only (get-stream (stream-id uint))
+  (map-get? funding-streams stream-id)
 )
